@@ -29,6 +29,7 @@ Requires `restic` **0.15.0 or newer** on the machine running restic-duper
 ```sh
 restic-duper init            # writes an example restic-duper.yaml
 $EDITOR restic-duper.yaml
+restic-duper bootstrap       # initialize destination repos that don't exist yet
 restic-duper check --connect # validate config and reach every repository
 restic-duper run
 ```
@@ -102,15 +103,22 @@ Notes:
   environment are scrubbed before invoking restic, so a stray
   `RESTIC_PASSWORD_FILE` in your shell can't override the pair's configured
   credentials. Cache and backend variables pass through.
-- Destination repositories must already be initialized (`restic init`). For
-  deduplication across copies, consider initializing the destination with
-  `restic init --copy-chunker-params --from-repo <source>`.
+- Destination repositories must exist before `run` will copy into them —
+  `run` never creates repositories. Use `restic-duper bootstrap` once to
+  initialize missing destinations: it runs
+  `restic init --copy-chunker-params --from-repo <source>` so copied
+  snapshots deduplicate against future direct backups, and it only creates a
+  repository when restic specifically reports "repository does not exist"
+  (exit code 10, restic ≥ 0.17) — never on wrong-password, network, or other
+  ambiguous errors, so a typo can't silently fork your backups to a new
+  location.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
 | `restic-duper run` | Copy snapshots for every pair (or `--pair name`, `--dry-run`) |
+| `restic-duper bootstrap` | Initialize destination repos that don't exist yet (`--pair` to limit) |
 | `restic-duper check` | Validate the config; `--connect` also probes every repository |
 | `restic-duper init [path]` | Write an example config |
 

@@ -240,6 +240,95 @@ exit 0
 	}
 }
 
+// EnsureRepo must init only on restic's dedicated "repository does not
+// exist" exit code (10), and must pass --copy-chunker-params --from-repo.
+func TestEnsureRepoInitsOnlyOnExit10(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "restic")
+	marker := filepath.Join(dir, "repo-exists")
+	argsLog := filepath.Join(dir, "init-args")
+	script := `#!/bin/sh
+if [ "$1" = "init" ] || [ "$3" = "init" ]; then
+  echo "$@" > ` + argsLog + `
+  touch ` + marker + `
+  exit 0
+fi
+[ -f ` + marker + ` ] && exit 0
+echo "Fatal: repository does not exist" >&2
+exit 10
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Restic: stub, Log: discard()}
+	p := &config.Pair{
+		Name: "boot",
+		From: config.Repo{Repo: "/src", Password: "a"},
+		To:   config.Repo{Repo: "/dst", Password: "b"},
+	}
+	inited, err := r.EnsureRepo(context.Background(), p)
+	if err != nil || !inited {
+		t.Fatalf("first EnsureRepo: inited=%v err=%v, want true/nil", inited, err)
+	}
+	args, _ := os.ReadFile(argsLog)
+	for _, want := range []string{"--copy-chunker-params", "--from-repo /src", "--repo /dst"} {
+		if !strings.Contains(string(args), want) {
+			t.Errorf("init args missing %q: %s", want, args)
+		}
+	}
+	inited, err = r.EnsureRepo(context.Background(), p)
+	if err != nil || inited {
+		t.Fatalf("second EnsureRepo: inited=%v err=%v, want false/nil", inited, err)
+	}
+}
+
+func TestEnsureRepoRefusesAmbiguousErrors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "restic")
+	// Exit 12 = wrong password: must NOT trigger init.
+	script := "#!/bin/sh\nif [ \"$1\" = init ] || [ \"$3\" = init ]; then echo INIT-RAN > " + filepath.Join(dir, "init-ran") + "; fi\necho 'Fatal: wrong password or no key found' >&2\nexit 12\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Restic: stub, Log: discard()}
+	p := &config.Pair{
+		Name: "locked",
+		From: config.Repo{Repo: "/src", Password: "a"},
+		To:   config.Repo{Repo: "/dst", Password: "wrong"},
+	}
+	inited, err := r.EnsureRepo(context.Background(), p)
+	if err == nil || inited {
+		t.Fatalf("wrong password must be an error, not an init: inited=%v err=%v", inited, err)
+	}
+	if !strings.Contains(err.Error(), "wrong password") {
+		t.Errorf("error should carry restic output: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "init-ran")); statErr == nil {
+		t.Error("init must not run on ambiguous errors")
+	}
+}
+
+func TestSupportsExitCodes(t *testing.T) {
+	r := &Runner{}
+	if r.SupportsExitCodes() {
+		t.Error("unknown version must not claim exit-code support")
+	}
+	r.ver, r.verKnown = [3]int{0, 16, 5}, true
+	if r.SupportsExitCodes() {
+		t.Error("0.16 must not claim exit-code support")
+	}
+	r.ver = [3]int{0, 17, 0}
+	if !r.SupportsExitCodes() {
+		t.Error("0.17 must claim exit-code support")
+	}
+}
+
 func TestRunPairFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell stub")

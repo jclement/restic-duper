@@ -4,6 +4,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -41,6 +42,20 @@ type Runner struct {
 	DryRun bool
 	// Verbose streams every line of restic output at INFO instead of DEBUG.
 	Verbose bool
+
+	ver      [3]int // detected restic version, set by CheckRestic
+	verKnown bool
+}
+
+// exitRepoDoesNotExist is restic's dedicated exit code (>= 0.17) for
+// "repository does not exist", distinct from wrong password (12) and
+// generic failures (1).
+const exitRepoDoesNotExist = 10
+
+// SupportsExitCodes reports whether the detected restic emits the specific
+// per-failure exit codes introduced in 0.17.
+func (r *Runner) SupportsExitCodes() bool {
+	return r.verKnown && !versionLess(r.ver, [3]int{0, 17, 0})
 }
 
 // CheckRestic verifies the restic binary exists and is recent enough.
@@ -54,6 +69,7 @@ func (r *Runner) CheckRestic(ctx context.Context) error {
 		r.Log.Warn("could not parse restic version; continuing", "output", strings.TrimSpace(string(out)))
 		return nil
 	}
+	r.ver, r.verKnown = ver, true
 	r.Log.Debug("restic detected", "version", fmt.Sprintf("%d.%d.%d", ver[0], ver[1], ver[2]))
 	if versionLess(ver, MinResticVersion) {
 		return fmt.Errorf("restic %d.%d.%d is too old: restic-duper needs >= %d.%d.%d for RESTIC_FROM_* support",
@@ -163,6 +179,45 @@ func PasswordEnv(prefix string, r *config.Repo) []string {
 		return []string{prefix + "_PASSWORD_COMMAND=" + r.PasswordCommand}
 	}
 	return nil
+}
+
+// EnsureRepo initializes the destination repository of a pair if — and only
+// if — restic reports it does not exist (exit code 10). Any other failure
+// (wrong password, network error, bad path) is returned as-is: creating a
+// repository on an ambiguous error could silently fork the offsite backups
+// to an unintended location. Returns true if the repository was created.
+func (r *Runner) EnsureRepo(ctx context.Context, p *config.Pair) (bool, error) {
+	log := r.Log.With("pair", p.Name)
+
+	probe := exec.CommandContext(ctx, r.Restic, "--repo", p.To.Repo, "--no-lock", "cat", "config")
+	probe.Env = BuildEnv(p)
+	out, err := probe.CombinedOutput()
+	if err == nil {
+		log.Debug("destination repository exists", "repo", RedactRepo(p.To.Repo))
+		return false, nil
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != exitRepoDoesNotExist {
+		return false, fmt.Errorf("cannot open destination %s (not initializing: only \"repository does not exist\" triggers init): %w: %s",
+			RedactRepo(p.To.Repo), err, RedactRepo(lastNonEmptyLine(out)))
+	}
+
+	log.Warn("destination repository does not exist; initializing",
+		"repo", RedactRepo(p.To.Repo), "chunker_params_from", RedactRepo(p.From.Repo))
+	init := exec.CommandContext(ctx, r.Restic, "init",
+		"--repo", p.To.Repo, "--from-repo", p.From.Repo, "--copy-chunker-params")
+	init.Env = BuildEnv(p)
+	if out, err := init.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("restic init of %s failed: %w: %s",
+			RedactRepo(p.To.Repo), err, RedactRepo(lastNonEmptyLine(out)))
+	}
+	log.Warn("destination repository initialized", "repo", RedactRepo(p.To.Repo))
+	return true, nil
+}
+
+func lastNonEmptyLine(b []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }
 
 // RunPair executes restic copy for one pair.

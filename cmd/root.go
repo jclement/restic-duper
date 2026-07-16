@@ -95,7 +95,6 @@ func configPath() (string, error) {
 	return "", fmt.Errorf("no config file found (searched %v); use --config or run 'restic-duper init'", candidates)
 }
 
-
 // warnConfigPerms nags when a config file that may hold passwords is
 // readable by other users.
 func warnConfigPerms(log *slog.Logger, path string) {
