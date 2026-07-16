@@ -35,14 +35,11 @@ locks, so schedule it when no copy is running.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		log := newLogger()
 		var rend *progressRenderer
-		if !flagForgetDryRun && useProgress(os.Stderr) {
+		if !flagForgetDryRun && useProgress() {
 			rend = newProgressRenderer(os.Stderr, useColor())
 			defer rend.Close()
-			level := slog.LevelWarn
-			if flagVerbose {
-				level = slog.LevelDebug
-			}
-			log = slog.New(newConsoleHandler(rend.LogWriter(), level))
+			w := rend.LogWriter()
+			log = slog.New(newConsoleHandler(w, w, slog.LevelWarn))
 		}
 		path, err := configPath()
 		if err != nil {
@@ -75,6 +72,9 @@ locks, so schedule it when no copy is running.`,
 		}
 		if rend != nil {
 			r.Progress = rend.Event
+			if flagVerbose {
+				r.Output = rend.VerboseLine
+			}
 		}
 		if err := r.CheckRestic(ctx); err != nil {
 			return err

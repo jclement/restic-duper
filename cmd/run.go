@@ -39,16 +39,14 @@ func runRun(cmd *cobra.Command, _ []string) error {
 	log := newLogger()
 	// On an interactive terminal, render live progress and route logs
 	// through the renderer; warnings and errors still show, routine info
-	// is replaced by the rendered lines (use -v for the full stream).
+	// is replaced by the rendered lines. With -v, raw restic output prints
+	// as dim lines above the live line.
 	var rend *progressRenderer
-	if !flagDryRun && useProgress(os.Stderr) {
+	if !flagDryRun && useProgress() {
 		rend = newProgressRenderer(os.Stderr, useColor())
 		defer rend.Close()
-		level := slog.LevelWarn
-		if flagVerbose {
-			level = slog.LevelDebug
-		}
-		log = slog.New(newConsoleHandler(rend.LogWriter(), level))
+		w := rend.LogWriter()
+		log = slog.New(newConsoleHandler(w, w, slog.LevelWarn))
 	}
 	path, err := configPath()
 	if err != nil {
@@ -98,6 +96,9 @@ func runRun(cmd *cobra.Command, _ []string) error {
 	}
 	if rend != nil {
 		r.Progress = rend.Event
+		if flagVerbose {
+			r.Output = rend.VerboseLine
+		}
 	}
 	if !flagDryRun {
 		if err := r.CheckRestic(ctx); err != nil {

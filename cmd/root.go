@@ -69,9 +69,13 @@ func newLogger() *slog.Logger {
 	}
 	var h slog.Handler
 	if flagJSON {
-		h = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+		opts := &slog.HandlerOptions{Level: level}
+		h = splitHandler{
+			low:  slog.NewJSONHandler(os.Stdout, opts),
+			high: slog.NewJSONHandler(os.Stderr, opts),
+		}
 	} else {
-		h = newConsoleHandler(os.Stderr, level)
+		h = newConsoleHandler(os.Stdout, os.Stderr, level)
 	}
 	return slog.New(h)
 }

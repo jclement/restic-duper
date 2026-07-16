@@ -142,6 +142,11 @@ Notes:
 Global flags: `--config/-c`, `--json` (structured logs), `--quiet/-q`,
 `--verbose/-v` (streams full restic output), `--no-progress`.
 
+Routine log records (info and below) go to **stdout**; warnings and errors
+go to **stderr** — so `restic-duper run > run.log 2> err.log` separates the
+run log from real problems, and an empty `err.log` means a clean run. The
+same split applies to `--json`.
+
 ## Terminal UI
 
 On an interactive terminal, `run` and `forget` render live progress —
@@ -154,9 +159,10 @@ restic's own progress reporting — finalizing each pair as a ✓/✗ line:
 ⠸ [3/3] media  /srv/restic/media → azure:backups:/media  ███████░░░░░░░░░░░░░░░  33.6%  76/226 packs  1:42
 ```
 
-Warnings and errors still print between updates; `-v` streams full restic
-output. The UI activates only when stderr is a real terminal — in cron,
-pipes, `--json`, or `--quiet` the output is exactly the plain logs shown
+Warnings and errors still print between updates; `-v` shows restic's raw
+output as dim lines above the live line. The UI activates only when **both
+stdout and stderr** are real terminals — redirecting either (cron, pipes,
+`> log`), `--json`, and `--quiet` all produce exactly the plain logs shown
 elsewhere in this README (`--no-progress` forces that; `NO_COLOR` disables
 colors).
 

@@ -13,15 +13,20 @@ import (
 // consoleHandler is a compact human-readable slog handler:
 //
 //	15:04:05 INFO  copy finished pair=local-to-b2 copied=1
+//
+// Records below WARN go to out (stdout), WARN and above to errOut (stderr),
+// so `restic-duper run > run.log 2> err.log` separates routine logging from
+// real problems.
 type consoleHandler struct {
-	mu    *sync.Mutex
-	w     io.Writer
-	level slog.Level
-	attrs []slog.Attr
+	mu     *sync.Mutex
+	out    io.Writer
+	errOut io.Writer
+	level  slog.Level
+	attrs  []slog.Attr
 }
 
-func newConsoleHandler(w io.Writer, level slog.Level) *consoleHandler {
-	return &consoleHandler{mu: &sync.Mutex{}, w: w, level: level}
+func newConsoleHandler(out, errOut io.Writer, level slog.Level) *consoleHandler {
+	return &consoleHandler{mu: &sync.Mutex{}, out: out, errOut: errOut, level: level}
 }
 
 func (h *consoleHandler) Enabled(_ context.Context, l slog.Level) bool {
@@ -45,7 +50,11 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 	b.WriteByte('\n')
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, err := io.WriteString(h.w, b.String())
+	w := h.out
+	if r.Level >= slog.LevelWarn {
+		w = h.errOut
+	}
+	_, err := io.WriteString(w, b.String())
 	return err
 }
 
@@ -68,3 +77,28 @@ func (h *consoleHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 }
 
 func (h *consoleHandler) WithGroup(string) slog.Handler { return h }
+
+// splitHandler routes records below WARN to low and WARN+ to high; used to
+// split JSON logs between stdout and stderr.
+type splitHandler struct {
+	low, high slog.Handler
+}
+
+func (h splitHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return h.low.Enabled(ctx, l) || h.high.Enabled(ctx, l)
+}
+
+func (h splitHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelWarn {
+		return h.high.Handle(ctx, r)
+	}
+	return h.low.Handle(ctx, r)
+}
+
+func (h splitHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return splitHandler{low: h.low.WithAttrs(attrs), high: h.high.WithAttrs(attrs)}
+}
+
+func (h splitHandler) WithGroup(g string) slog.Handler {
+	return splitHandler{low: h.low.WithGroup(g), high: h.high.WithGroup(g)}
+}

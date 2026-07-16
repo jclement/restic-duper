@@ -8,21 +8,32 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/jclement/restic-duper/internal/runner"
 )
 
 // useProgress decides whether the live terminal renderer should be active:
-// only on a real character device, never for --json/--quiet, and honoring
+// only when BOTH stdout and stderr are real terminals (if either is
+// redirected, the user wants logs), never for --json/--quiet, and honoring
 // TERM=dumb and --no-progress.
-func useProgress(f *os.File) bool {
+func useProgress() bool {
 	if flagJSON || flagQuiet || flagNoProgress {
 		return false
 	}
 	if os.Getenv("TERM") == "dumb" {
 		return false
 	}
-	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+}
+
+// termWidth returns the terminal width for the renderer's output, with a
+// conservative default when it cannot be determined.
+func termWidth(f *os.File) int {
+	if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 20 {
+		return w
+	}
+	return 100
 }
 
 func useColor() bool {
@@ -187,20 +198,54 @@ func (p *progressRenderer) redrawLocked() {
 		return
 	}
 	spin := spinnerFrames[p.frame%len(spinnerFrames)]
-	elapsed := time.Since(p.start).Round(time.Second)
+	elapsed := fmtElapsed(time.Since(p.start).Round(time.Second))
+	width := p.width()
 
-	var mid string
+	// Compose with plain-text lengths first so the line can be fitted to
+	// the terminal width; a wrapped live line cannot be cleared with a
+	// single erase-line and leaves artifacts.
+	var midPlain, mid string
 	switch {
 	case p.total > 0:
-		mid = fmt.Sprintf("%s %5.1f%%  %d/%d %s",
-			p.paint(ansiCyan, renderBar(p.percent, 22)), p.percent, p.done, p.total, p.unit)
+		bar := renderBar(p.percent, 22)
+		rest := fmt.Sprintf(" %5.1f%%  %d/%d %s", p.percent, p.done, p.total, p.unit)
+		midPlain = bar + rest
+		mid = p.paint(ansiCyan, bar) + rest
 	case p.snapshot != "":
-		mid = p.paint(ansiDim, "snapshot "+p.snapshot)
+		midPlain = "snapshot " + p.snapshot
+		mid = p.paint(ansiDim, midPlain)
 	default:
-		mid = p.paint(ansiDim, "starting…")
+		midPlain = "starting…"
+		mid = p.paint(ansiDim, midPlain)
 	}
-	fmt.Fprint(p.w, ansiClear+fmt.Sprintf("%s %s  %s  %s",
-		p.paint(ansiCyan, spin), p.label, mid, p.paint(ansiDim, fmtElapsed(elapsed))))
+
+	label := p.label
+	// 1 spinner + spaces + elapsed
+	overhead := 1 + 1 + 2 + 2 + len(elapsed)
+	if over := len([]rune(label)) + len([]rune(midPlain)) + overhead - width; over > 0 {
+		max := len([]rune(label)) - over
+		if max < 12 {
+			max = 12
+		}
+		label = truncate(label, max)
+	}
+	line := fmt.Sprintf("%s %s  %s  %s",
+		p.paint(ansiCyan, spin), label, mid, p.paint(ansiDim, elapsed))
+	fmt.Fprint(p.w, ansiClear+line)
+}
+
+// width returns the current terminal width when the output is a file.
+func (p *progressRenderer) width() int {
+	if f, ok := p.w.(*os.File); ok {
+		return termWidth(f)
+	}
+	return 100
+}
+
+// VerboseLine prints one line of raw restic output dimmed above the live
+// line; used by -v in pretty mode instead of timestamped log records.
+func (p *progressRenderer) VerboseLine(line string) {
+	p.Println(p.paint(ansiDim, "  "+truncate(line, p.width()-3)))
 }
 
 // renderBar draws a fixed-width unicode bar for percent (0-100).

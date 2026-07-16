@@ -60,6 +60,9 @@ type Runner struct {
 	// Setting it also asks restic to emit progress lines to the pipe
 	// (RESTIC_PROGRESS_FPS).
 	Progress func(ProgressEvent)
+	// Output, when set, receives every non-progress line of restic output
+	// verbatim (used by the terminal UI's verbose mode).
+	Output func(line string)
 
 	ver      [3]int // detected restic version, set by CheckRestic
 	verKnown bool
@@ -386,8 +389,8 @@ func (r *Runner) RunPair(ctx context.Context, p *config.Pair) Result {
 	}
 	cmd.WaitDelay = 30 * time.Second
 	counter := &copyCounter{}
-	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose, progress: r.Progress}
-	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose, progress: r.Progress}
+	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose, progress: r.Progress, output: r.Output}
+	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose, progress: r.Progress, output: r.Output}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -474,8 +477,8 @@ func (r *Runner) ForgetPair(ctx context.Context, p *config.Pair, prune, dryRun b
 		cmd.Env = append(cmd.Env, "RESTIC_PROGRESS_FPS=10")
 	}
 	counter := &copyCounter{}
-	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose, progress: r.Progress}
-	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose, progress: r.Progress}
+	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose, progress: r.Progress, output: r.Output}
+	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose, progress: r.Progress, output: r.Output}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -583,6 +586,7 @@ type lineWriter struct {
 	counter  *copyCounter
 	verbose  bool
 	progress func(ProgressEvent)
+	output   func(string)
 	buf      []byte
 }
 
@@ -632,6 +636,9 @@ func (w *lineWriter) emit(line string) {
 		if m := snapStartRe.FindStringSubmatch(line); m != nil {
 			w.progress(ProgressEvent{SnapshotID: m[1]})
 		}
+	}
+	if w.output != nil {
+		w.output(line)
 	}
 	if w.verbose {
 		w.log.Info(line, "stream", w.stream)
