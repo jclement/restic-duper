@@ -4,6 +4,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -181,6 +182,118 @@ func PasswordEnv(prefix string, r *config.Repo) []string {
 	return nil
 }
 
+// SideEnv builds the environment for running restic against a single side
+// of a pair (RESTIC_PASSWORD* for that side only), e.g. for probes and
+// status queries.
+func SideEnv(p *config.Pair, side *config.Repo) []string {
+	env := ScrubEnv(os.Environ())
+	for k, v := range p.MergedEnv() {
+		env = append(env, k+"="+v)
+	}
+	return append(env, PasswordEnv("RESTIC", side)...)
+}
+
+// Snapshot is the subset of restic's snapshot JSON we need.
+type Snapshot struct {
+	ID       string    `json:"id"`
+	Original string    `json:"original"` // source snapshot ID when created by restic copy
+	Time     time.Time `json:"time"`
+	Hostname string    `json:"hostname"`
+}
+
+// ListSnapshots returns all snapshots in one side's repository.
+func (r *Runner) ListSnapshots(ctx context.Context, p *config.Pair, side *config.Repo) ([]Snapshot, error) {
+	out, err := r.sideJSON(ctx, p, side, "snapshots")
+	if err != nil {
+		return nil, err
+	}
+	var snaps []Snapshot
+	if err := unmarshalResticJSON(out, &snaps); err != nil {
+		return nil, fmt.Errorf("parsing restic snapshots output: %w", err)
+	}
+	return snaps, nil
+}
+
+// RawDataSize returns the repository's packed data size in bytes.
+func (r *Runner) RawDataSize(ctx context.Context, p *config.Pair, side *config.Repo) (int64, error) {
+	out, err := r.sideJSON(ctx, p, side, "stats", "--mode", "raw-data")
+	if err != nil {
+		return 0, err
+	}
+	var st struct {
+		TotalSize int64 `json:"total_size"`
+	}
+	if err := unmarshalResticJSON(out, &st); err != nil {
+		return 0, fmt.Errorf("parsing restic stats output: %w", err)
+	}
+	return st.TotalSize, nil
+}
+
+// unmarshalResticJSON tolerates restic's habit of writing progress lines to
+// stdout ahead of the JSON document (observed with stats, even under
+// --quiet): it tries the whole output first, then each line from the last
+// upward.
+func unmarshalResticJSON(out []byte, v any) error {
+	firstErr := json.Unmarshal(out, v)
+	if firstErr == nil {
+		return nil
+	}
+	lines := bytes.Split(bytes.TrimSpace(out), []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 || (line[0] != '{' && line[0] != '[') {
+			continue
+		}
+		if err := json.Unmarshal(line, v); err == nil {
+			return nil
+		}
+	}
+	return firstErr
+}
+
+func (r *Runner) sideJSON(ctx context.Context, p *config.Pair, side *config.Repo, args ...string) ([]byte, error) {
+	// --quiet: restic writes progress lines to stdout even when not on a
+	// terminal (e.g. stats), which would corrupt the JSON document.
+	full := append([]string{"--repo", side.Repo, "--no-lock", "--json", "--quiet"}, args...)
+	cmd := exec.CommandContext(ctx, r.Restic, full...)
+	cmd.Env = SideEnv(p, side)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("restic %s on %s: %w: %s",
+			args[0], RedactRepo(side.Repo), err, RedactRepo(lastNonEmptyLine(stderr.Bytes())))
+	}
+	return out, nil
+}
+
+// Latest returns the most recent snapshot, or nil for an empty list.
+func Latest(snaps []Snapshot) *Snapshot {
+	var latest *Snapshot
+	for i := range snaps {
+		if latest == nil || snaps[i].Time.After(latest.Time) {
+			latest = &snaps[i]
+		}
+	}
+	return latest
+}
+
+// InSync reports whether the destination contains the source's latest
+// snapshot — either as a direct copy (destination snapshot's "original"
+// points at it) or, unusually, under the same ID.
+func InSync(src, dst []Snapshot) bool {
+	latest := Latest(src)
+	if latest == nil {
+		return true // nothing to replicate
+	}
+	for _, d := range dst {
+		if d.ID == latest.ID || d.Original == latest.ID {
+			return true
+		}
+	}
+	return false
+}
+
 // EnsureRepo initializes the destination repository of a pair if — and only
 // if — restic reports it does not exist (exit code 10). Any other failure
 // (wrong password, network error, bad path) is returned as-is: creating a
@@ -298,6 +411,71 @@ func (r *Runner) RunPair(ctx context.Context, p *config.Pair) Result {
 	log.Info("copy finished",
 		"copied", res.Copied, "skipped", res.Skipped,
 		"duration", res.Duration.Round(time.Second))
+	return res
+}
+
+// ForgetPair applies the pair's retention policy to the DESTINATION
+// repository via restic forget (optionally with --prune). The source
+// repository is never touched.
+func (r *Runner) ForgetPair(ctx context.Context, p *config.Pair, prune, dryRun bool) Result {
+	log := r.Log.With("pair", p.Name)
+	res := Result{Name: p.Name, Status: "success"}
+
+	args := []string{"forget", "--repo", p.To.Repo}
+	args = append(args, p.Retention.Args()...)
+	args = append(args, p.Retention.ForgetArgs...)
+	if dryRun {
+		args = append(args, "--dry-run")
+	}
+	if prune {
+		args = append(args, "--prune")
+	}
+
+	if p.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.Timeout.Std())
+		defer cancel()
+	}
+
+	log.Info("forget started", "repo", RedactRepo(p.To.Repo), "policy", strings.Join(p.Retention.Args(), " "), "prune", prune, "dry_run", dryRun)
+	start := time.Now()
+
+	cmd := exec.CommandContext(ctx, r.Restic, args...)
+	cmd.Env = SideEnv(p, &p.To)
+	if runtime.GOOS != "windows" {
+		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	}
+	cmd.WaitDelay = 30 * time.Second
+	counter := &copyCounter{}
+	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose}
+	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	err := cmd.Run()
+	stdout.flush()
+	stderr.flush()
+	res.Duration = time.Since(start)
+	res.Seconds = res.Duration.Round(time.Millisecond).Seconds()
+
+	if err != nil {
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			err = fmt.Errorf("timed out after %s", p.Timeout.Std())
+		case context.Canceled:
+			err = fmt.Errorf("interrupted by signal (%v)", err)
+		}
+		res.Status = "failure"
+		res.Error = err.Error()
+		if lines := counter.lastLines(); lines != "" {
+			res.Error += ": " + lines
+		}
+		res.Error = RedactRepo(res.Error)
+		log.Error("forget failed", "error", res.Error, "duration", res.Duration.Round(time.Second))
+		return res
+	}
+
+	log.Info("forget finished", "duration", res.Duration.Round(time.Second))
 	return res
 }
 

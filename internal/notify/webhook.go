@@ -19,6 +19,7 @@ import (
 type Payload struct {
 	Tool       string          `json:"tool"` // "restic-duper"
 	Version    string          `json:"version"`
+	Command    string          `json:"command,omitempty"` // "run" | "forget"
 	Host       string          `json:"host"`
 	Status     string          `json:"status"`          // "success" | "failure"
 	Error      string          `json:"error,omitempty"` // set for setup failures that prevented any pair from running

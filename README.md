@@ -69,6 +69,12 @@ pairs:
     # copy_args: ["--host", "myserver"]     # extra args passed to restic copy
     # timeout: 6h
     # allow_empty: false                    # zero matched snapshots = failure (default)
+    # retention:                            # applied to the DESTINATION by "forget"
+    #   keep_daily: 14
+    #   keep_weekly: 8
+    #   keep_monthly: 12
+    #   # keep_last / keep_hourly / keep_yearly / keep_within: 30d
+    #   # forget_args: ["--group-by", "host"]
 ```
 
 Notes:
@@ -118,6 +124,8 @@ Notes:
 | Command | Purpose |
 |---|---|
 | `restic-duper run` | Copy snapshots for every pair (or `--pair name`, `--dry-run`) |
+| `restic-duper status` (alias `verify`) | Per pair: snapshot counts, last backup time, size, and whether the destination has the source's latest snapshot |
+| `restic-duper forget` | Apply each pair's `retention` policy to its destination and prune (`--dry-run`, `--no-prune`) |
 | `restic-duper bootstrap` | Initialize destination repos that don't exist yet (`--pair` to limit) |
 | `restic-duper check` | Validate the config; `--connect` also probes every repository |
 | `restic-duper init [path]` | Write an example config |
@@ -166,14 +174,42 @@ switches, use the base ping URL with `on_success: true` and
 they stop happening entirely. (Don't point failure notifications at a plain
 ping URL — any POST registers as a success ping there.)
 
+## Verifying replication
+
+`restic-duper status` (alias: `verify`) inspects both sides of every pair —
+read-only, no locks — and reports snapshot count, most recent snapshot time,
+and repository size. It also checks that the destination contains a copy of
+the source's **latest** snapshot (via the `original` field restic copy
+records), and exits `2` if any repository is unreachable or any pair is
+behind, so it works as a scheduled verification step. `--json` emits the
+report as JSON on stdout.
+
+```
+PAIR   SIDE    REPO                  SNAPSHOTS  LATEST                     SIZE      STATE
+test1  source  /srv/restic/test1     42         2026-07-15 06:00 (3h ago)  11.3 GiB
+       dest    azure:backups:/test1  42         2026-07-15 06:14 (3h ago)  11.3 GiB  in sync
+```
+
+## Retention
+
+Pairs with a `retention` block can have their **destination** pruned with
+`restic-duper forget` (the source is never touched — its retention belongs
+to whatever creates its backups). Runs `restic forget --prune` with the
+pair's `keep_*` policy; `--dry-run` previews, `--no-prune` skips the space
+reclamation. Failures notify the webhook like `run` does (payload
+`command: "forget"`). Note prune takes exclusive repository locks — schedule
+it when no copy is running.
+
 ## Scheduling
 
 restic-duper is log-based (no TUI) so it drops straight into cron or a
 systemd timer:
 
 ```
-# /etc/cron.d/restic-duper — offsite copy at 06:00 daily
-0 6 * * * backup /usr/local/bin/restic-duper run -c /etc/restic-duper/config.yaml
+# /etc/cron.d/restic-duper
+0 6 * * *  backup /usr/local/bin/restic-duper run    -c /etc/restic-duper/config.yaml
+0 8 * * *  backup /usr/local/bin/restic-duper status -c /etc/restic-duper/config.yaml -q
+0 3 * * 0  backup /usr/local/bin/restic-duper forget -c /etc/restic-duper/config.yaml
 ```
 
 ## Security notes

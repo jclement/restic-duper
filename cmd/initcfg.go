@@ -41,6 +41,10 @@ pairs:
     # copy_args: ["--host", "myserver"]   # extra args passed to restic copy
     # timeout: 6h
     # allow_empty: false      # zero matched snapshots = failure (default)
+    # retention:              # applied to the DESTINATION by "restic-duper forget"
+    #   keep_daily: 14
+    #   keep_weekly: 8
+    #   keep_monthly: 12
 `
 
 var initCmd = &cobra.Command{

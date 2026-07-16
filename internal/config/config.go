@@ -80,6 +80,55 @@ type Pair struct {
 	// copy always saves or skips at least one snapshot — zero matches means
 	// the source is empty or the filters match nothing.
 	AllowEmpty bool `yaml:"allow_empty"`
+	// Retention, if set, lets "restic-duper forget" apply a keep policy
+	// (and prune) to the DESTINATION repository. The source repository is
+	// never touched — its retention belongs to whatever creates its backups.
+	Retention *Retention `yaml:"retention"`
+}
+
+// Retention mirrors restic forget's --keep-* policy flags.
+type Retention struct {
+	KeepLast    int    `yaml:"keep_last"`
+	KeepHourly  int    `yaml:"keep_hourly"`
+	KeepDaily   int    `yaml:"keep_daily"`
+	KeepWeekly  int    `yaml:"keep_weekly"`
+	KeepMonthly int    `yaml:"keep_monthly"`
+	KeepYearly  int    `yaml:"keep_yearly"`
+	KeepWithin  string `yaml:"keep_within"` // e.g. "30d", "2y5m7d"
+	// ForgetArgs are extra arguments for restic forget (e.g. --group-by).
+	ForgetArgs []string `yaml:"forget_args"`
+}
+
+// Args renders the policy as restic forget flags.
+func (r *Retention) Args() []string {
+	var out []string
+	add := func(flag string, n int) {
+		if n > 0 {
+			out = append(out, flag, fmt.Sprintf("%d", n))
+		}
+	}
+	add("--keep-last", r.KeepLast)
+	add("--keep-hourly", r.KeepHourly)
+	add("--keep-daily", r.KeepDaily)
+	add("--keep-weekly", r.KeepWeekly)
+	add("--keep-monthly", r.KeepMonthly)
+	add("--keep-yearly", r.KeepYearly)
+	if r.KeepWithin != "" {
+		out = append(out, "--keep-within", r.KeepWithin)
+	}
+	return out
+}
+
+func (r *Retention) validate() error {
+	for _, n := range []int{r.KeepLast, r.KeepHourly, r.KeepDaily, r.KeepWeekly, r.KeepMonthly, r.KeepYearly} {
+		if n < 0 {
+			return fmt.Errorf("keep_* values must not be negative")
+		}
+	}
+	if len(r.Args()) == 0 {
+		return fmt.Errorf("retention must set at least one keep_* policy (otherwise forget would have nothing to keep)")
+	}
+	return nil
 }
 
 // Load reads, expands, and validates a config file.
@@ -200,6 +249,11 @@ func (c *Config) Validate() error {
 		}
 		if err := p.To.validate(); err != nil {
 			return fmt.Errorf("pair %q: to: %w", p.Name, err)
+		}
+		if p.Retention != nil {
+			if err := p.Retention.validate(); err != nil {
+				return fmt.Errorf("pair %q: retention: %w", p.Name, err)
+			}
 		}
 		if p.From.Repo == p.To.Repo {
 			return fmt.Errorf("pair %q: from and to are the same repository (%s)", p.Name, p.From.Repo)

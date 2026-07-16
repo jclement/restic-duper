@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jclement/restic-duper/internal/config"
 )
@@ -311,6 +312,92 @@ func TestEnsureRepoRefusesAmbiguousErrors(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "init-ran")); statErr == nil {
 		t.Error("init must not run on ambiguous errors")
+	}
+}
+
+func TestLatestAndInSync(t *testing.T) {
+	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	src := []Snapshot{
+		{ID: "old", Time: t0},
+		{ID: "new", Time: t0.Add(24 * time.Hour)},
+	}
+	if l := Latest(src); l == nil || l.ID != "new" {
+		t.Fatalf("Latest = %+v", l)
+	}
+	if Latest(nil) != nil {
+		t.Error("Latest(nil) must be nil")
+	}
+
+	dstSynced := []Snapshot{{ID: "copy1", Original: "old"}, {ID: "copy2", Original: "new"}}
+	dstBehind := []Snapshot{{ID: "copy1", Original: "old"}}
+	if !InSync(src, dstSynced) {
+		t.Error("dest with copy of latest must be in sync")
+	}
+	if InSync(src, dstBehind) {
+		t.Error("dest missing latest must be behind")
+	}
+	if !InSync(nil, nil) {
+		t.Error("empty source is trivially in sync")
+	}
+}
+
+// ForgetPair must target the destination only, carry the keep policy, and
+// respect prune/dry-run flags.
+func TestForgetPair(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "restic")
+	argsLog := filepath.Join(dir, "args")
+	script := "#!/bin/sh\necho \"$@\" > " + argsLog + "\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Restic: stub, Log: discard()}
+	p := &config.Pair{
+		Name:      "ret",
+		From:      config.Repo{Repo: "/src", Password: "a"},
+		To:        config.Repo{Repo: "/dst", Password: "b"},
+		Retention: &config.Retention{KeepDaily: 7, ForgetArgs: []string{"--group-by", "host"}},
+	}
+	if res := r.ForgetPair(context.Background(), p, true, false); !res.OK() {
+		t.Fatalf("ForgetPair: %s", res.Error)
+	}
+	args, _ := os.ReadFile(argsLog)
+	got := strings.TrimSpace(string(args))
+	for _, want := range []string{"forget --repo /dst", "--keep-daily 7", "--group-by host", "--prune"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("args missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "/src") {
+		t.Errorf("forget must never touch the source repo: %s", got)
+	}
+
+	if res := r.ForgetPair(context.Background(), p, false, true); !res.OK() {
+		t.Fatalf("ForgetPair dry-run: %s", res.Error)
+	}
+	args, _ = os.ReadFile(argsLog)
+	got = strings.TrimSpace(string(args))
+	if !strings.Contains(got, "--dry-run") || strings.Contains(got, "--prune") {
+		t.Errorf("dry-run without prune expected: %s", got)
+	}
+}
+
+func TestUnmarshalResticJSONSkipsProgressLines(t *testing.T) {
+	out := []byte("[0:00] 100.00%  1 / 1 snapshots, 10 blobs, 2.840 KiB\n{\"total_size\":2908}\n")
+	var st struct {
+		TotalSize int64 `json:"total_size"`
+	}
+	if err := unmarshalResticJSON(out, &st); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if st.TotalSize != 2908 {
+		t.Errorf("total_size = %d", st.TotalSize)
+	}
+	if err := unmarshalResticJSON([]byte("garbage\nmore garbage"), &st); err == nil {
+		t.Error("expected error for non-JSON output")
 	}
 }
 

@@ -53,6 +53,7 @@ func runRun(cmd *cobra.Command, _ []string) error {
 	setupFail := func(err error) error {
 		if !flagDryRun && cfg.Notifications.Webhook != nil && cfg.Notifications.Webhook.FireOnFailure() {
 			p := notify.NewPayload(version, started, nil)
+			p.Command = "run"
 			p.Status = "failure"
 			p.Error = err.Error()
 			nctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -100,20 +101,8 @@ func runRun(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if !flagDryRun && cfg.Notifications.Webhook != nil {
-		w := cfg.Notifications.Webhook
-		payload := notify.NewPayload(version, started, results)
-		shouldSend := (payload.Status == "failure" && w.FireOnFailure()) ||
-			(payload.Status == "success" && w.OnSuccess)
-		if shouldSend {
-			// Use a fresh context: the run context may already be canceled
-			// (Ctrl-C), and the failure notification matters most then.
-			nctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			if err := notify.Send(nctx, log, w, payload); err != nil {
-				log.Error("notification failed", "error", err)
-			}
-		}
+	if !flagDryRun {
+		sendNotification(log, cfg, "run", started, results)
 	}
 
 	ok := len(results) - failed

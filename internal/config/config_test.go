@@ -215,6 +215,48 @@ pairs:
 	}
 }
 
+func TestRetention(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+pairs:
+  - name: p
+    from: {repo: /a, password: x}
+    to: {repo: /b, password: y}
+    retention:
+      keep_daily: 14
+      keep_weekly: 8
+      keep_within: 30d
+      forget_args: ["--group-by", "host"]
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.Pairs[0].Retention.Args()
+	want := []string{"--keep-daily", "14", "--keep-weekly", "8", "--keep-within", "30d"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("Args = %v, want %v", got, want)
+	}
+
+	for name, body := range map[string]string{
+		"empty retention": `
+pairs:
+  - name: p
+    from: {repo: /a, password: x}
+    to: {repo: /b, password: y}
+    retention: {}`,
+		"negative keep": `
+pairs:
+  - name: p
+    from: {repo: /a, password: x}
+    to: {repo: /b, password: y}
+    retention:
+      keep_daily: -1`,
+	} {
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
 func TestMergedEnv(t *testing.T) {
 	p := Pair{
 		From: Repo{Env: map[string]string{"A": "1", "SHARED": "x"}},
