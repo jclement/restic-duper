@@ -85,6 +85,56 @@ func TestSendRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
+// The "events" format must post a JSON array of flat per-pair events with
+// _time and level fields (Axiom-style ingest).
+func TestSendEventsFormat(t *testing.T) {
+	var got []Event
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		json.NewDecoder(r.Body).Decode(&got)
+	}))
+	defer srv.Close()
+
+	w := webhookFor(srv.URL)
+	w.Format = "events"
+	w.Headers["Authorization"] = "Bearer tok123"
+
+	finished := time.Date(2026, 7, 15, 20, 45, 0, 0, time.UTC)
+	p := NewPayload("1.0", time.Now(), []runner.Result{
+		{Name: "a", FromRepo: "/src", ToRepo: "azure:c:/p", Status: "success", Seconds: 174, Copied: 1, FinishedAt: finished},
+		{Name: "b", Status: "failure", Error: "boom", FinishedAt: finished},
+	})
+	p.Command = "run"
+	if err := Send(context.Background(), discard(), w, p); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if auth != "Bearer tok123" {
+		t.Errorf("Authorization = %q", auth)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 events, got %d: %+v", len(got), got)
+	}
+	e := got[0]
+	if e.Time != "2026-07-15T20:45:00Z" || e.Service != "restic-duper" || e.Command != "run" ||
+		e.Pair != "a" || e.ToRepo != "azure:c:/p" || e.Level != "info" || e.SnapshotsCopied != 1 {
+		t.Errorf("bad event: %+v", e)
+	}
+	if got[1].Level != "error" || got[1].Error != "boom" {
+		t.Errorf("failure event must have level=error: %+v", got[1])
+	}
+}
+
+func TestEventsSetupFailure(t *testing.T) {
+	p := NewPayload("1.0", time.Now(), nil)
+	p.Status = "failure"
+	p.Error = "cannot run restic"
+	evs := Events(p)
+	if len(evs) != 1 || evs[0].Level != "error" || evs[0].Error != "cannot run restic" || evs[0].Time == "" {
+		t.Errorf("bad setup-failure events: %+v", evs)
+	}
+}
+
 // A redirect must be a delivery failure: following it would turn the POST
 // into a GET and silently drop the payload.
 func TestSendTreatsRedirectAsFailure(t *testing.T) {

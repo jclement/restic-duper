@@ -25,13 +25,16 @@ var MinResticVersion = [3]int{0, 15, 0}
 
 // Result is the outcome of one pair.
 type Result struct {
-	Name     string        `json:"name"`
-	Status   string        `json:"status"` // "success" | "failure"
-	Error    string        `json:"error,omitempty"`
-	Duration time.Duration `json:"-"`
-	Seconds  float64       `json:"duration_seconds"`
-	Copied   int           `json:"snapshots_copied"`
-	Skipped  int           `json:"snapshots_skipped"` // already present in destination
+	Name       string        `json:"name"`
+	FromRepo   string        `json:"from_repo,omitempty"` // redacted
+	ToRepo     string        `json:"to_repo,omitempty"`   // redacted
+	Status     string        `json:"status"`              // "success" | "failure"
+	Error      string        `json:"error,omitempty"`
+	Duration   time.Duration `json:"-"`
+	FinishedAt time.Time     `json:"-"`
+	Seconds    float64       `json:"duration_seconds"`
+	Copied     int           `json:"snapshots_copied"`
+	Skipped    int           `json:"snapshots_skipped"` // already present in destination
 }
 
 func (r Result) OK() bool { return r.Status == "success" }
@@ -337,7 +340,8 @@ func lastNonEmptyLine(b []byte) string {
 func (r *Runner) RunPair(ctx context.Context, p *config.Pair) Result {
 	log := r.Log.With("pair", p.Name)
 	args := BuildArgs(p)
-	res := Result{Name: p.Name, Status: "success"}
+	res := Result{Name: p.Name, Status: "success",
+		FromRepo: RedactRepo(p.From.Repo), ToRepo: RedactRepo(p.To.Repo)}
 
 	if r.DryRun {
 		log.Info("dry-run: would execute", "cmd", r.Restic+" "+strings.Join(args, " "))
@@ -373,6 +377,7 @@ func (r *Runner) RunPair(ctx context.Context, p *config.Pair) Result {
 	stdout.flush()
 	stderr.flush()
 	res.Duration = time.Since(start)
+	res.FinishedAt = time.Now().UTC()
 	res.Seconds = res.Duration.Round(time.Millisecond).Seconds()
 	res.Copied, res.Skipped = counter.totals()
 
@@ -419,7 +424,8 @@ func (r *Runner) RunPair(ctx context.Context, p *config.Pair) Result {
 // repository is never touched.
 func (r *Runner) ForgetPair(ctx context.Context, p *config.Pair, prune, dryRun bool) Result {
 	log := r.Log.With("pair", p.Name)
-	res := Result{Name: p.Name, Status: "success"}
+	res := Result{Name: p.Name, Status: "success",
+		FromRepo: RedactRepo(p.From.Repo), ToRepo: RedactRepo(p.To.Repo)}
 
 	args := []string{"forget", "--repo", p.To.Repo}
 	args = append(args, p.Retention.Args()...)
@@ -456,6 +462,7 @@ func (r *Runner) ForgetPair(ctx context.Context, p *config.Pair, prune, dryRun b
 	stdout.flush()
 	stderr.flush()
 	res.Duration = time.Since(start)
+	res.FinishedAt = time.Now().UTC()
 	res.Seconds = res.Duration.Round(time.Millisecond).Seconds()
 
 	if err != nil {

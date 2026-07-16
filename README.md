@@ -167,8 +167,53 @@ restic binary) are reported too, with a top-level `error` field instead of
 `pairs`. Redirects are treated as delivery failures — point the webhook at
 the final URL.
 
-This works directly with services that accept arbitrary JSON POSTs (ntfy, or
-Discord/Slack via a small relay). For **healthchecks.io**-style dead-man's
+### Event-ingest APIs (Axiom, etc.)
+
+Set `format: events` to post a JSON **array** with one flat event per pair
+instead of the single run object — the shape event-ingest APIs like
+[Axiom](https://axiom.co) expect. Each event carries `_time` (RFC3339),
+`level` (`info`/`error`) for severity highlighting, `status`, `pair`,
+`from_repo`/`to_repo` (credentials redacted), `duration_seconds`, and the
+snapshot counters. Use `on_success: true` so healthy runs are ingested too.
+
+```yaml
+notifications:
+  webhook:
+    url: https://<axiom-edge-domain>/v1/ingest/backup-events
+    format: events
+    headers:
+      Authorization: Bearer ${AXIOM_INGEST_TOKEN}
+    on_success: true
+    on_failure: true
+```
+
+```json
+[
+  {
+    "_time": "2026-07-15T20:45:00Z",
+    "service": "restic-duper",
+    "version": "0.4.0",
+    "command": "run",
+    "host": "prod-01",
+    "pair": "main-to-offsite",
+    "from_repo": "/srv/restic/main",
+    "to_repo": "azure:backups:/main",
+    "status": "success",
+    "level": "info",
+    "duration_seconds": 174.2,
+    "snapshots_copied": 1,
+    "snapshots_skipped": 0
+  }
+]
+```
+
+A setup failure that prevented any pair from running is sent as a single
+run-level event with `level: "error"` and the error message.
+
+### Simple JSON receivers
+
+The default `format: payload` works with services that accept arbitrary JSON
+POSTs (ntfy, or Discord/Slack via a small relay). For **healthchecks.io**-style dead-man's
 switches, use the base ping URL with `on_success: true` and
 `on_failure: false`: the check then alerts both when runs fail *and* when
 they stop happening entirely. (Don't point failure notifications at a plain

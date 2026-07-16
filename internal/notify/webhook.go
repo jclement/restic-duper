@@ -48,14 +48,87 @@ func NewPayload(version string, started time.Time, results []runner.Result) Payl
 	return p
 }
 
+// Event is one flat record in the "events" webhook format — an array of
+// these is what event-ingest APIs like Axiom expect. Field names follow
+// common conventions: _time for the event timestamp, level for
+// severity-based highlighting.
+type Event struct {
+	Time             string  `json:"_time"` // RFC3339
+	Service          string  `json:"service"`
+	Version          string  `json:"version"`
+	Command          string  `json:"command,omitempty"` // "run" | "forget"
+	Host             string  `json:"host"`
+	Pair             string  `json:"pair,omitempty"`
+	FromRepo         string  `json:"from_repo,omitempty"`
+	ToRepo           string  `json:"to_repo,omitempty"`
+	Status           string  `json:"status"` // "success" | "failure"
+	Level            string  `json:"level"`  // "info" | "error"
+	Error            string  `json:"error,omitempty"`
+	DurationSeconds  float64 `json:"duration_seconds"`
+	SnapshotsCopied  int     `json:"snapshots_copied"`
+	SnapshotsSkipped int     `json:"snapshots_skipped"`
+}
+
+// Events flattens a Payload into one event per pair. A run that produced no
+// pair results (e.g. a setup failure) yields a single run-level event so
+// the failure still reaches the ingest pipeline.
+func Events(p Payload) []Event {
+	base := Event{
+		Service: "restic-duper",
+		Version: p.Version,
+		Command: p.Command,
+		Host:    p.Host,
+	}
+	level := func(status string) string {
+		if status == "failure" {
+			return "error"
+		}
+		return "info"
+	}
+	if len(p.Pairs) == 0 {
+		e := base
+		e.Time = p.FinishedAt.Format(time.RFC3339)
+		e.Status = p.Status
+		e.Level = level(p.Status)
+		e.Error = p.Error
+		return []Event{e}
+	}
+	events := make([]Event, 0, len(p.Pairs))
+	for _, r := range p.Pairs {
+		e := base
+		t := r.FinishedAt
+		if t.IsZero() {
+			t = p.FinishedAt
+		}
+		e.Time = t.Format(time.RFC3339)
+		e.Pair = r.Name
+		e.FromRepo = r.FromRepo
+		e.ToRepo = r.ToRepo
+		e.Status = r.Status
+		e.Level = level(r.Status)
+		e.Error = r.Error
+		e.DurationSeconds = r.Seconds
+		e.SnapshotsCopied = r.Copied
+		e.SnapshotsSkipped = r.Skipped
+		events = append(events, e)
+	}
+	return events
+}
+
 const attempts = 3
 
 // retryUnit scales retry backoff (attempt * retryUnit); tests shrink it.
 var retryUnit = 2 * time.Second
 
 // Send delivers the payload, retrying transient failures with backoff.
+// With format "events" the body is a JSON array of per-pair events instead
+// of a single run object.
 func Send(ctx context.Context, log *slog.Logger, w *config.Webhook, p Payload) error {
-	body, err := json.Marshal(p)
+	var doc any = p
+	if w.Format == "events" {
+		doc = Events(p)
+	}
+	body, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("encoding webhook payload: %w", err)
 	}

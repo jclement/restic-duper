@@ -45,12 +45,17 @@ type Notifications struct {
 
 // Webhook describes a generic HTTP webhook fired when a run finishes.
 type Webhook struct {
-	URL       string            `yaml:"url"`
-	Method    string            `yaml:"method"`     // default POST
-	Headers   map[string]string `yaml:"headers"`    // extra headers
-	OnSuccess bool              `yaml:"on_success"` // default false
-	OnFailure *bool             `yaml:"on_failure"` // default true
-	Timeout   Duration          `yaml:"timeout"`    // default 30s
+	URL     string            `yaml:"url"`
+	Method  string            `yaml:"method"`  // default POST
+	Headers map[string]string `yaml:"headers"` // extra headers
+	// Format selects the body shape: "payload" (default) posts one JSON
+	// object describing the whole run; "events" posts a JSON array with one
+	// flat event per pair (with _time, level, status fields), compatible
+	// with event-ingest APIs like Axiom.
+	Format    string   `yaml:"format"`
+	OnSuccess bool     `yaml:"on_success"` // default false
+	OnFailure *bool    `yaml:"on_failure"` // default true
+	Timeout   Duration `yaml:"timeout"`    // default 30s
 }
 
 func (w *Webhook) FireOnFailure() bool { return w.OnFailure == nil || *w.OnFailure }
@@ -275,6 +280,12 @@ func (c *Config) Validate() error {
 		}
 		if w.Method == "" {
 			w.Method = "POST"
+		}
+		if w.Format == "" {
+			w.Format = "payload"
+		}
+		if w.Format != "payload" && w.Format != "events" {
+			return fmt.Errorf("notifications.webhook: format must be \"payload\" or \"events\", got %q", w.Format)
 		}
 		if w.Timeout == 0 {
 			w.Timeout = Duration(30 * time.Second)

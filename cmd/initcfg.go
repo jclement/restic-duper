@@ -20,6 +20,7 @@ notifications:
   webhook:
     url: https://example.com/hooks/restic-duper
     # method: POST            # default
+    # format: payload         # "payload" (single object) or "events" (array per pair, e.g. Axiom)
     # headers:
     #   Authorization: Bearer ${WEBHOOK_TOKEN}
     on_failure: true          # default
