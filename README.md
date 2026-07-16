@@ -140,7 +140,25 @@ Notes:
 | `restic-duper self-update` | Replace this binary with the latest GitHub release (`--check` to only look) |
 
 Global flags: `--config/-c`, `--json` (structured logs), `--quiet/-q`,
-`--verbose/-v` (streams full restic output).
+`--verbose/-v` (streams full restic output), `--no-progress`.
+
+## Terminal UI
+
+On an interactive terminal, `run` and `forget` render live progress —
+a spinner, the snapshot being copied, and a pack-level progress bar fed by
+restic's own progress reporting — finalizing each pair as a ✓/✗ line:
+
+```
+✓ [1/3] svc1  /srv/restic/svc1 → azure:backups:/svc1  copied 1, skipped 0 (14.2s)
+✗ [2/3] svc2  /srv/restic/svc2 → azure:backups:/svc2  exit status 12: Fatal: wrong password… (0.8s)
+⠸ [3/3] media  /srv/restic/media → azure:backups:/media  ███████░░░░░░░░░░░░░░░  33.6%  76/226 packs  1:42
+```
+
+Warnings and errors still print between updates; `-v` streams full restic
+output. The UI activates only when stderr is a real terminal — in cron,
+pipes, `--json`, or `--quiet` the output is exactly the plain logs shown
+elsewhere in this README (`--no-progress` forces that; `NO_COLOR` disables
+colors).
 
 Pairs run sequentially. Exit code is `0` on success, `2` if any pair failed,
 `1` on config or setup errors.
@@ -262,8 +280,8 @@ it when no copy is running.
 
 ## Scheduling
 
-restic-duper is log-based (no TUI) so it drops straight into cron or a
-systemd timer:
+Outside a terminal restic-duper is purely log-based, so it drops straight
+into cron or a systemd timer:
 
 ```
 # /etc/cron.d/restic-duper

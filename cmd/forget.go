@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,6 +34,16 @@ locks, so schedule it when no copy is running.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		log := newLogger()
+		var rend *progressRenderer
+		if !flagForgetDryRun && useProgress(os.Stderr) {
+			rend = newProgressRenderer(os.Stderr, useColor())
+			defer rend.Close()
+			level := slog.LevelWarn
+			if flagVerbose {
+				level = slog.LevelDebug
+			}
+			log = slog.New(newConsoleHandler(rend.LogWriter(), level))
+		}
 		path, err := configPath()
 		if err != nil {
 			return err
@@ -62,6 +73,9 @@ locks, so schedule it when no copy is running.`,
 		if r.Restic == "" {
 			r.Restic = "restic"
 		}
+		if rend != nil {
+			r.Progress = rend.Event
+		}
 		if err := r.CheckRestic(ctx); err != nil {
 			return err
 		}
@@ -79,10 +93,21 @@ locks, so schedule it when no copy is running.`,
 				skipped++
 				continue
 			}
+			if rend != nil {
+				rend.StartPair(fmt.Sprintf("[%d/%d] forget %s  %s", i+1, len(pairs),
+					pairs[i].Name, truncate(runner.RedactRepo(pairs[i].To.Repo), 40)))
+			}
 			res := r.ForgetPair(ctx, &pairs[i], !flagNoPrune, flagForgetDryRun)
 			results = append(results, res)
 			if !res.OK() {
 				failed++
+			}
+			if rend != nil {
+				detail := "policy applied"
+				if !res.OK() {
+					detail = res.Error
+				}
+				rend.FinishPair(res.OK(), detail, res.Duration)
 			}
 		}
 
@@ -90,16 +115,24 @@ locks, so schedule it when no copy is running.`,
 			sendNotification(log, cfg, "forget", started, results)
 		}
 
-		summary := log.With("succeeded", len(results)-failed, "failed", failed, "skipped", skipped,
-			"duration", time.Since(started).Round(time.Second))
+		if rend != nil {
+			rend.Summary(failed == 0, fmt.Sprintf("%d succeeded, %d failed, %d skipped  (%s)",
+				len(results)-failed, failed, skipped, time.Since(started).Round(time.Second)))
+		} else {
+			summary := log.With("succeeded", len(results)-failed, "failed", failed, "skipped", skipped,
+				"duration", time.Since(started).Round(time.Second))
+			if failed > 0 {
+				summary.Error("forget finished with failures")
+			} else if ctx.Err() == nil {
+				summary.Info("forget finished")
+			}
+		}
 		if failed > 0 {
-			summary.Error("forget finished with failures")
 			os.Exit(2)
 		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("forget interrupted")
 		}
-		summary.Info("forget finished")
 		return nil
 	},
 }

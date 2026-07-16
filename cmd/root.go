@@ -25,10 +25,11 @@ func init() {
 }
 
 var (
-	flagConfig  string
-	flagJSON    bool
-	flagQuiet   bool
-	flagVerbose bool
+	flagConfig     string
+	flagJSON       bool
+	flagQuiet      bool
+	flagVerbose    bool
+	flagNoProgress bool
 )
 
 var rootCmd = &cobra.Command{
@@ -55,6 +56,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "log in JSON format")
 	rootCmd.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "only log warnings and errors")
 	rootCmd.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "stream full restic output")
+	rootCmd.PersistentFlags().BoolVar(&flagNoProgress, "no-progress", false, "disable the live terminal progress display")
 }
 
 func newLogger() *slog.Logger {

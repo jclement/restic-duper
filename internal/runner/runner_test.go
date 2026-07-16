@@ -134,6 +134,40 @@ func TestCopyCounter(t *testing.T) {
 	}
 }
 
+func TestLineWriterProgressEvents(t *testing.T) {
+	var events []ProgressEvent
+	c := &copyCounter{}
+	w := &lineWriter{log: discard(), stream: "stdout", counter: c,
+		progress: func(ev ProgressEvent) { events = append(events, ev) }}
+	for _, line := range []string{
+		"snapshot d1ac293c of [/data] at 2026-07-16 15:12:54 by jsc@quark",
+		"  copy started, this may take a while...",
+		"[0:12] 54.24%  122 / 226 packs copied",
+		"[1:02:03] 100.00%  226 / 226 packs copied",
+		"snapshot b2ee9156 saved, copied from source snapshot d1ac293c",
+	} {
+		io.WriteString(w, line+"\n")
+	}
+	if len(events) != 3 {
+		t.Fatalf("want 3 events, got %d: %+v", len(events), events)
+	}
+	if events[0].SnapshotID != "d1ac293c" {
+		t.Errorf("snapshot event = %+v", events[0])
+	}
+	e := events[1]
+	if e.Percent != 54.24 || e.Done != 122 || e.Total != 226 || e.Unit != "packs" {
+		t.Errorf("progress event = %+v", e)
+	}
+	if events[2].Percent != 100.00 || events[2].Done != 226 {
+		t.Errorf("final progress event = %+v", events[2])
+	}
+	// counting must be unaffected
+	copied, _ := c.totals()
+	if copied != 1 {
+		t.Errorf("copied = %d, want 1", copied)
+	}
+}
+
 func TestLineWriterSplitsAndFlushes(t *testing.T) {
 	c := &copyCounter{}
 	w := &lineWriter{log: discard(), stream: "stdout", counter: c}

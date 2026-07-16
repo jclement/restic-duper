@@ -39,6 +39,16 @@ type Result struct {
 
 func (r Result) OK() bool { return r.Status == "success" }
 
+// ProgressEvent reports live progress parsed from restic's output.
+type ProgressEvent struct {
+	// SnapshotID is set (alone) when restic starts copying a new snapshot.
+	SnapshotID string
+	// Percent/Done/Total describe a progress tick, e.g. "54.2% 122/226 packs".
+	Percent     float64
+	Done, Total int
+	Unit        string // "packs", "blobs", ...
+}
+
 // Runner drives restic.
 type Runner struct {
 	Restic string // path to restic binary
@@ -46,6 +56,10 @@ type Runner struct {
 	DryRun bool
 	// Verbose streams every line of restic output at INFO instead of DEBUG.
 	Verbose bool
+	// Progress, when set, receives live events parsed from restic output.
+	// Setting it also asks restic to emit progress lines to the pipe
+	// (RESTIC_PROGRESS_FPS).
+	Progress func(ProgressEvent)
 
 	ver      [3]int // detected restic version, set by CheckRestic
 	verKnown bool
@@ -359,6 +373,10 @@ func (r *Runner) RunPair(ctx context.Context, p *config.Pair) Result {
 
 	cmd := exec.CommandContext(ctx, r.Restic, args...)
 	cmd.Env = BuildEnv(p)
+	if r.Progress != nil {
+		// Ask restic to emit progress lines to the (non-tty) pipe.
+		cmd.Env = append(cmd.Env, "RESTIC_PROGRESS_FPS=10")
+	}
 	// On cancellation (Ctrl-C, SIGTERM, pair timeout) ask restic to stop
 	// gracefully so it can release its repository locks; escalate to SIGKILL
 	// only if it has not exited within WaitDelay. Go's default would SIGKILL
@@ -368,8 +386,8 @@ func (r *Runner) RunPair(ctx context.Context, p *config.Pair) Result {
 	}
 	cmd.WaitDelay = 30 * time.Second
 	counter := &copyCounter{}
-	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose}
-	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose}
+	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose, progress: r.Progress}
+	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose, progress: r.Progress}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -452,9 +470,12 @@ func (r *Runner) ForgetPair(ctx context.Context, p *config.Pair, prune, dryRun b
 		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	}
 	cmd.WaitDelay = 30 * time.Second
+	if r.Progress != nil {
+		cmd.Env = append(cmd.Env, "RESTIC_PROGRESS_FPS=10")
+	}
 	counter := &copyCounter{}
-	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose}
-	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose}
+	stdout := &lineWriter{log: log, stream: "stdout", counter: counter, verbose: r.Verbose, progress: r.Progress}
+	stderr := &lineWriter{log: log, stream: "stderr", counter: counter, verbose: r.Verbose, progress: r.Progress}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -510,6 +531,12 @@ var (
 	// restic warns and exits 0 when the snapshot filter matched nothing:
 	//	Ignoring "latest": no snapshot matched given filter (Paths:[] Tags:[] Hosts:[])
 	ignoredRe = regexp.MustCompile(`no snapshot matched`)
+	// Progress lines restic emits when RESTIC_PROGRESS_FPS is set:
+	//	[0:12] 54.24%  122 / 226 packs copied
+	progressRe = regexp.MustCompile(`^\[[0-9:]+\] +([0-9.]+)% +([0-9]+) / ([0-9]+) ([a-z]+)`)
+	// Header announcing which snapshot is being copied:
+	//	snapshot d1ac293c of [/some/path] at 2026-07-16 ...
+	snapStartRe = regexp.MustCompile(`^snapshot ([0-9a-f]+) of \[`)
 )
 
 func (c *copyCounter) observe(line string) {
@@ -551,11 +578,12 @@ func (c *copyCounter) ignoredLine() string {
 // called from exec's copy goroutine; splitting happens synchronously so no
 // data is in flight once cmd.Run returns.
 type lineWriter struct {
-	log     *slog.Logger
-	stream  string
-	counter *copyCounter
-	verbose bool
-	buf     []byte
+	log      *slog.Logger
+	stream   string
+	counter  *copyCounter
+	verbose  bool
+	progress func(ProgressEvent)
+	buf      []byte
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
@@ -590,6 +618,21 @@ func (w *lineWriter) emit(line string) {
 		return
 	}
 	w.counter.observe(line)
+	if w.progress != nil {
+		if m := progressRe.FindStringSubmatch(line); m != nil {
+			var ev ProgressEvent
+			fmt.Sscanf(m[1], "%f", &ev.Percent)
+			fmt.Sscanf(m[2], "%d", &ev.Done)
+			fmt.Sscanf(m[3], "%d", &ev.Total)
+			ev.Unit = m[4]
+			w.progress(ev)
+			w.log.Debug(line, "stream", w.stream)
+			return // progress ticks never go to INFO, even with -v
+		}
+		if m := snapStartRe.FindStringSubmatch(line); m != nil {
+			w.progress(ProgressEvent{SnapshotID: m[1]})
+		}
+	}
 	if w.verbose {
 		w.log.Info(line, "stream", w.stream)
 	} else {

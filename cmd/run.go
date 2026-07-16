@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"slices"
@@ -36,6 +37,19 @@ func init() {
 
 func runRun(cmd *cobra.Command, _ []string) error {
 	log := newLogger()
+	// On an interactive terminal, render live progress and route logs
+	// through the renderer; warnings and errors still show, routine info
+	// is replaced by the rendered lines (use -v for the full stream).
+	var rend *progressRenderer
+	if !flagDryRun && useProgress(os.Stderr) {
+		rend = newProgressRenderer(os.Stderr, useColor())
+		defer rend.Close()
+		level := slog.LevelWarn
+		if flagVerbose {
+			level = slog.LevelDebug
+		}
+		log = slog.New(newConsoleHandler(rend.LogWriter(), level))
+	}
 	path, err := configPath()
 	if err != nil {
 		return err
@@ -82,6 +96,9 @@ func runRun(cmd *cobra.Command, _ []string) error {
 	if r.Restic == "" {
 		r.Restic = "restic"
 	}
+	if rend != nil {
+		r.Progress = rend.Event
+	}
 	if !flagDryRun {
 		if err := r.CheckRestic(ctx); err != nil {
 			return setupFail(err)
@@ -94,10 +111,21 @@ func runRun(cmd *cobra.Command, _ []string) error {
 			log.Warn("interrupted; skipping remaining pairs", "remaining", len(pairs)-i)
 			break
 		}
+		if rend != nil {
+			rend.StartPair(fmt.Sprintf("[%d/%d] %s", i+1, len(pairs),
+				pairLabel(pairs[i].Name, pairs[i].From.Repo, pairs[i].To.Repo)))
+		}
 		res := r.RunPair(ctx, &pairs[i])
 		results = append(results, res)
 		if !res.OK() {
 			failed++
+		}
+		if rend != nil {
+			detail := fmt.Sprintf("copied %d, skipped %d", res.Copied, res.Skipped)
+			if !res.OK() {
+				detail = res.Error
+			}
+			rend.FinishPair(res.OK(), detail, res.Duration)
 		}
 	}
 
@@ -106,15 +134,23 @@ func runRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	ok := len(results) - failed
-	summary := log.With("succeeded", ok, "failed", failed, "duration", time.Since(started).Round(time.Second))
+	if rend != nil {
+		rend.Summary(failed == 0, fmt.Sprintf("%d succeeded, %d failed  (%s)",
+			ok, failed, time.Since(started).Round(time.Second)))
+	} else {
+		summary := log.With("succeeded", ok, "failed", failed, "duration", time.Since(started).Round(time.Second))
+		if failed > 0 {
+			summary.Error("run finished with failures")
+		} else if ctx.Err() == nil {
+			summary.Info("run finished")
+		}
+	}
 	if failed > 0 {
-		summary.Error("run finished with failures")
 		os.Exit(2)
 	}
 	if ctx.Err() != nil {
 		return fmt.Errorf("run interrupted")
 	}
-	summary.Info("run finished")
 	return nil
 }
 
