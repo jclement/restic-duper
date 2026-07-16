@@ -135,10 +135,17 @@ func Send(ctx context.Context, log *slog.Logger, w *config.Webhook, p Payload) e
 
 	client := &http.Client{
 		Timeout: w.Timeout.Std(),
-		// Never follow redirects: Go would convert the POST to a GET and
-		// drop the JSON body, then report 200 — a silently lost
-		// notification. A 3xx response is treated as a delivery failure.
-		CheckRedirect: func(*http.Request, []*http.Request) error {
+		// 307/308 preserve the method and body, so following them is safe
+		// (Go re-sends the payload via GetBody). 301/302/303 would convert
+		// the POST to a GET and silently drop the JSON body, so those are
+		// surfaced to the caller as delivery failures instead.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("stopped after 5 redirects")
+			}
+			if c := req.Response.StatusCode; c == http.StatusTemporaryRedirect || c == http.StatusPermanentRedirect {
+				return nil
+			}
 			return http.ErrUseLastResponse
 		},
 	}
@@ -177,6 +184,9 @@ func send(ctx context.Context, client *http.Client, w *config.Webhook, body []by
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if loc := resp.Header.Get("Location"); loc != "" && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return fmt.Errorf("unexpected status %s (redirects to %s — update the webhook url to the final address)", resp.Status, loc)
+		}
 		return fmt.Errorf("unexpected status %s", resp.Status)
 	}
 	return nil

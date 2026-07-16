@@ -135,9 +135,9 @@ func TestEventsSetupFailure(t *testing.T) {
 	}
 }
 
-// A redirect must be a delivery failure: following it would turn the POST
-// into a GET and silently drop the payload.
-func TestSendTreatsRedirectAsFailure(t *testing.T) {
+// A method-changing redirect (301/302/303) must be a delivery failure:
+// following it would turn the POST into a GET and silently drop the payload.
+func TestSendTreatsMovedRedirectAsFailure(t *testing.T) {
 	var followed atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/final" {
@@ -150,10 +150,39 @@ func TestSendTreatsRedirectAsFailure(t *testing.T) {
 
 	err := Send(context.Background(), discard(), webhookFor(srv.URL), Payload{})
 	if err == nil {
-		t.Fatal("redirect must be reported as a failure")
+		t.Fatal("301 must be reported as a failure")
+	}
+	if !strings.Contains(err.Error(), "/final") {
+		t.Errorf("error should include the redirect target: %v", err)
 	}
 	if followed.Load() {
-		t.Error("redirect must not be followed")
+		t.Error("301 must not be followed")
+	}
+}
+
+// 307/308 preserve method and body, so they are followed and the payload
+// must arrive intact at the final URL.
+func TestSendFollowsTemporaryRedirect(t *testing.T) {
+	var gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/final" {
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+			return
+		}
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+	}))
+	defer srv.Close()
+
+	if err := Send(context.Background(), discard(), webhookFor(srv.URL), Payload{Status: "failure"}); err != nil {
+		t.Fatalf("307 should be followed: %v", err)
+	}
+	if gotMethod != "POST" {
+		t.Errorf("method after 307 = %s, want POST", gotMethod)
+	}
+	if !strings.Contains(gotBody, `"failure"`) {
+		t.Errorf("body was dropped across redirect: %q", gotBody)
 	}
 }
 

@@ -173,8 +173,11 @@ by default only when something failed. Delivery is retried three times.
 
 Setup failures that prevent any pair from running (bad pair name, missing
 restic binary) are reported too, with a top-level `error` field instead of
-`pairs`. Redirects are treated as delivery failures — point the webhook at
-the final URL.
+`pairs`. Method-preserving redirects (307/308) are followed, up to five
+hops. Method-changing redirects (301/302/303) are treated as delivery
+failures — following them would turn the POST into a bodyless GET — and the
+error message includes the redirect target so you can update `url` to the
+final address.
 
 ### Event-ingest APIs (Axiom, etc.)
 
