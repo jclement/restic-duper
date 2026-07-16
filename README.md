@@ -191,7 +191,10 @@ snapshot counters. Use `on_success: true` so healthy runs are ingested too.
 ```yaml
 notifications:
   webhook:
-    url: https://<axiom-edge-domain>/v1/ingest/backup-events
+    # Axiom's API ingest path is /v1/datasets/<dataset>/ingest.
+    # (Do NOT use app.axiom.co — that's the web UI; it redirects POSTs to a
+    # login page that answers 200, which looks like a successful delivery.)
+    url: https://api.axiom.co/v1/datasets/backup-events/ingest
     format: events
     headers:
       Authorization: Bearer ${AXIOM_INGEST_TOKEN}
