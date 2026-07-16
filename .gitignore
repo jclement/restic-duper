@@ -1,0 +1,3 @@
+/restic-duper
+/dist/
+*.yaml.local
