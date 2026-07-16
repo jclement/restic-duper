@@ -153,11 +153,10 @@ pears:
 
 func TestExpandEnv(t *testing.T) {
 	t.Setenv("RD_TEST_SECRET", "s3cr3t")
-	out, err := ExpandEnv([]byte("password: ${RD_TEST_SECRET} and $HOME and $5"))
+	got, err := ExpandEnv("password: ${RD_TEST_SECRET} and $HOME and $5")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := string(out)
 	if !strings.Contains(got, "s3cr3t") {
 		t.Errorf("did not expand ${RD_TEST_SECRET}: %s", got)
 	}
@@ -165,8 +164,54 @@ func TestExpandEnv(t *testing.T) {
 		t.Errorf("bare $ tokens must be left alone: %s", got)
 	}
 
-	if _, err := ExpandEnv([]byte("x: ${RD_TEST_DEFINITELY_UNSET_VAR}")); err == nil {
+	if _, err := ExpandEnv("x: ${RD_TEST_DEFINITELY_UNSET_VAR}"); err == nil {
 		t.Error("expected error for unset variable")
+	}
+}
+
+// Expansion must operate on parsed values, not raw YAML text: secrets with
+// YAML metacharacters stay literal and cannot alter document structure.
+func TestExpansionIsYAMLSafe(t *testing.T) {
+	t.Setenv("RD_HASH_PW", "r4nd #x9!")
+	t.Setenv("RD_INJECT_PW", "x\nenv: {AWS_ACCESS_KEY_ID: evil}")
+	cfg, err := Load(writeConfig(t, `
+pairs:
+  - name: p
+    from:
+      repo: /a
+      password: ${RD_HASH_PW}
+    to:
+      repo: /b
+      password: ${RD_INJECT_PW}
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Pairs[0].From.Password; got != "r4nd #x9!" {
+		t.Errorf("password with '#' truncated: %q", got)
+	}
+	if got := cfg.Pairs[0].To.Password; got != "x\nenv: {AWS_ACCESS_KEY_ID: evil}" {
+		t.Errorf("newline value altered: %q", got)
+	}
+	if len(cfg.Pairs[0].To.Env) != 0 {
+		t.Errorf("YAML injection succeeded: %v", cfg.Pairs[0].To.Env)
+	}
+}
+
+func TestUnsetVarInCommentIgnored(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+# example: ${RD_TOTALLY_UNSET_COMMENT_VAR}
+pairs:
+  - name: p
+    # another ${RD_ALSO_UNSET}
+    from: {repo: /a, password: x}
+    to: {repo: /b, password: y}
+`))
+	if err != nil {
+		t.Fatalf("comments must not trigger expansion errors: %v", err)
+	}
+	if len(cfg.Pairs) != 1 {
+		t.Fatal("bad parse")
 	}
 }
 

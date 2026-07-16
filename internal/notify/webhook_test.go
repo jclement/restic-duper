@@ -85,6 +85,28 @@ func TestSendRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
+// A redirect must be a delivery failure: following it would turn the POST
+// into a GET and silently drop the payload.
+func TestSendTreatsRedirectAsFailure(t *testing.T) {
+	var followed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/final" {
+			followed.Store(true)
+			return
+		}
+		http.Redirect(w, r, "/final", http.StatusMovedPermanently)
+	}))
+	defer srv.Close()
+
+	err := Send(context.Background(), discard(), webhookFor(srv.URL), Payload{})
+	if err == nil {
+		t.Fatal("redirect must be reported as a failure")
+	}
+	if followed.Load() {
+		t.Error("redirect must not be followed")
+	}
+}
+
 func TestSendGivesUp(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

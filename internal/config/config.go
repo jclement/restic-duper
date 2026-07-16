@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"time"
@@ -74,22 +75,31 @@ type Pair struct {
 	Snapshots string   `yaml:"snapshots"`
 	CopyArgs  []string `yaml:"copy_args"`
 	Timeout   Duration `yaml:"timeout"` // 0 = no timeout
+	// AllowEmpty permits a run in which restic copy matched zero snapshots.
+	// By default that is treated as a failure, because a healthy "latest"
+	// copy always saves or skips at least one snapshot — zero matches means
+	// the source is empty or the filters match nothing.
+	AllowEmpty bool `yaml:"allow_empty"`
 }
 
 // Load reads, expands, and validates a config file.
+//
+// ${VAR} expansion happens on the parsed YAML scalar values, never on the
+// raw file text: expanded values are always plain strings, so secrets
+// containing '#', ':', or newlines cannot truncate a value or inject YAML
+// structure, and ${VAR} inside comments is ignored.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	expanded, err := ExpandEnv(data)
-	if err != nil {
+	var cfg Config
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	var cfg Config
-	dec := yaml.NewDecoder(bytes.NewReader(expanded))
-	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil {
+	if err := cfg.expand(); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -98,25 +108,68 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// expand applies ExpandEnv to every user-supplied string value in the
+// already-parsed config.
+func (c *Config) expand() error {
+	fields := []*string{&c.ResticBinary}
+	if w := c.Notifications.Webhook; w != nil {
+		fields = append(fields, &w.URL)
+		if err := expandMap(w.Headers); err != nil {
+			return err
+		}
+	}
+	for i := range c.Pairs {
+		p := &c.Pairs[i]
+		for _, r := range []*Repo{&p.From, &p.To} {
+			fields = append(fields, &r.Repo, &r.Password, &r.PasswordFile, &r.PasswordCommand)
+			if err := expandMap(r.Env); err != nil {
+				return err
+			}
+		}
+		for j := range p.CopyArgs {
+			fields = append(fields, &p.CopyArgs[j])
+		}
+	}
+	for _, f := range fields {
+		v, err := ExpandEnv(*f)
+		if err != nil {
+			return err
+		}
+		*f = v
+	}
+	return nil
+}
+
+func expandMap(m map[string]string) error {
+	for k, v := range m {
+		nv, err := ExpandEnv(v)
+		if err != nil {
+			return err
+		}
+		m[k] = nv
+	}
+	return nil
+}
+
 var envRef = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
 
 // ExpandEnv replaces ${VAR} references with values from the process
 // environment. Unlike os.ExpandEnv it leaves bare $VAR untouched (passwords
 // often contain '$'), and it errors on references to unset variables rather
 // than silently substituting "".
-func ExpandEnv(data []byte) ([]byte, error) {
+func ExpandEnv(s string) (string, error) {
 	var missing []string
-	out := envRef.ReplaceAllFunc(data, func(m []byte) []byte {
-		name := string(m[2 : len(m)-1])
+	out := envRef.ReplaceAllStringFunc(s, func(m string) string {
+		name := m[2 : len(m)-1]
 		v, ok := os.LookupEnv(name)
 		if !ok {
 			missing = append(missing, name)
 			return m
 		}
-		return []byte(v)
+		return v
 	})
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("config references unset environment variable(s): %v", missing)
+		return "", fmt.Errorf("config references unset environment variable(s): %v", missing)
 	}
 	return out, nil
 }

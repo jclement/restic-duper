@@ -71,6 +71,48 @@ func TestBuildEnv(t *testing.T) {
 	}
 }
 
+func TestBuildEnvScrubsAmbientResticVars(t *testing.T) {
+	t.Setenv("RESTIC_PASSWORD_FILE", "/ambient/leak")
+	t.Setenv("RESTIC_FROM_REPOSITORY", "/ambient/repo")
+	t.Setenv("RESTIC_CACHE_DIR", "/keep/me")
+	p := &config.Pair{
+		From: config.Repo{Repo: "/src", Password: "a"},
+		To:   config.Repo{Repo: "/dst", Password: "b"},
+	}
+	env := BuildEnv(p)
+	for _, e := range env {
+		if strings.HasPrefix(e, "RESTIC_PASSWORD_FILE=") || strings.HasPrefix(e, "RESTIC_FROM_REPOSITORY=") {
+			t.Errorf("ambient credential variable leaked: %s", e)
+		}
+	}
+	if !slicesContains(env, "RESTIC_CACHE_DIR=/keep/me") {
+		t.Error("non-credential restic variables must pass through")
+	}
+}
+
+func slicesContains(env []string, want string) bool {
+	for _, e := range env {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRedactRepo(t *testing.T) {
+	in := "rest:https://user:hunter2@backup.example.com/repo"
+	got := RedactRepo(in)
+	if strings.Contains(got, "hunter2") {
+		t.Errorf("password not redacted: %s", got)
+	}
+	if got != "rest:https://user:***@backup.example.com/repo" {
+		t.Errorf("unexpected redaction: %s", got)
+	}
+	if plain := RedactRepo("/srv/restic/main"); plain != "/srv/restic/main" {
+		t.Errorf("plain path mangled: %s", plain)
+	}
+}
+
 func TestCopyCounter(t *testing.T) {
 	c := &copyCounter{}
 	for _, line := range []string{
@@ -159,6 +201,42 @@ exit 0
 	}
 	if res.Copied != 1 || res.Skipped != 1 {
 		t.Errorf("copied=%d skipped=%d, want 1/1", res.Copied, res.Skipped)
+	}
+}
+
+// A zero-snapshot copy (restic exit 0 with "no snapshot matched") must fail
+// the pair unless allow_empty is set — this is the tool's core false-success
+// guard.
+func TestRunPairNoMatchIsFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "restic")
+	script := `#!/bin/sh
+echo 'Ignoring "latest": no snapshot matched given filter (Paths:[] Tags:[] Hosts:[nosuchhost])' >&2
+exit 0
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Restic: stub, Log: discard()}
+	p := &config.Pair{
+		Name: "empty",
+		From: config.Repo{Repo: "/src", Password: "x"},
+		To:   config.Repo{Repo: "/dst", Password: "y"},
+	}
+	res := r.RunPair(context.Background(), p)
+	if res.OK() {
+		t.Fatal("zero matched snapshots must be a failure by default")
+	}
+	if !strings.Contains(res.Error, "no snapshot matched") {
+		t.Errorf("error should carry restic's warning: %q", res.Error)
+	}
+
+	p.AllowEmpty = true
+	if res := r.RunPair(context.Background(), p); !res.OK() {
+		t.Errorf("allow_empty pair must succeed: %s", res.Error)
 	}
 }
 

@@ -6,12 +6,25 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
 
-// version is injected at release time via -ldflags.
+// version is injected at release time via -ldflags; for go-install builds
+// it falls back to the module version from build info.
 var version = "dev"
+
+func init() {
+	if version == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			version = bi.Main.Version
+		}
+	}
+	rootCmd.Version = version
+}
 
 var (
 	flagConfig  string
@@ -75,10 +88,38 @@ func configPath() (string, error) {
 	candidates = append(candidates, "/etc/restic-duper/config.yaml")
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
+			if err := trustedConfig(c); err != nil {
+				return "", fmt.Errorf("refusing auto-discovered config %s: %v (pass it explicitly with --config to override)", c, err)
+			}
 			return c, nil
 		}
 	}
 	return "", fmt.Errorf("no config file found (searched %v); use --config or run 'restic-duper init'", candidates)
+}
+
+// trustedConfig rejects auto-discovered config files that another user could
+// have planted or modified: password_command executes arbitrary commands, so
+// picking up a stranger's restic-duper.yaml from a shared working directory
+// must not happen implicitly.
+func trustedConfig(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	if uid := os.Getuid(); int(st.Uid) != uid && st.Uid != 0 {
+		return fmt.Errorf("not owned by you or root (owner uid %d)", st.Uid)
+	}
+	if info.Mode().Perm()&0o002 != 0 {
+		return fmt.Errorf("world-writable (%s)", info.Mode().Perm())
+	}
+	return nil
 }
 
 // warnConfigPerms nags when a config file that may hold passwords is

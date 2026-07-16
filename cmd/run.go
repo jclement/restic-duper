@@ -45,10 +45,28 @@ func runRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	warnConfigPerms(log, path)
+	started := time.Now()
+
+	// Once the config (and thus the webhook) is known, setup failures are
+	// reported through it too — otherwise webhook-only monitoring would
+	// never hear about a bad pair name or a missing restic binary.
+	setupFail := func(err error) error {
+		if !flagDryRun && cfg.Notifications.Webhook != nil && cfg.Notifications.Webhook.FireOnFailure() {
+			p := notify.NewPayload(version, started, nil)
+			p.Status = "failure"
+			p.Error = err.Error()
+			nctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if nerr := notify.Send(nctx, log, cfg.Notifications.Webhook, p); nerr != nil {
+				log.Error("notification failed", "error", nerr)
+			}
+		}
+		return err
+	}
 
 	pairs, err := selectPairs(cfg, flagPairs)
 	if err != nil {
-		return err
+		return setupFail(err)
 	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -65,11 +83,9 @@ func runRun(cmd *cobra.Command, _ []string) error {
 	}
 	if !flagDryRun {
 		if err := r.CheckRestic(ctx); err != nil {
-			return err
+			return setupFail(err)
 		}
 	}
-
-	started := time.Now()
 	var results []runner.Result
 	failed := 0
 	for i := range pairs {

@@ -52,10 +52,10 @@ var checkCmd = &cobra.Command{
 				repo  *config.Repo
 			}{{"from", &p.From}, {"to", &p.To}} {
 				if err := probeRepo(restic, p, side.repo); err != nil {
-					log.Error("repository unreachable", "pair", p.Name, "side", side.label, "repo", side.repo.Repo, "error", err)
+					log.Error("repository unreachable", "pair", p.Name, "side", side.label, "repo", runner.RedactRepo(side.repo.Repo), "error", runner.RedactRepo(err.Error()))
 					failures++
 				} else {
-					log.Info("repository ok", "pair", p.Name, "side", side.label, "repo", side.repo.Repo)
+					log.Info("repository ok", "pair", p.Name, "side", side.label, "repo", runner.RedactRepo(side.repo.Repo))
 				}
 			}
 		}
@@ -70,7 +70,7 @@ var checkCmd = &cobra.Command{
 // reading its config object.
 func probeRepo(restic string, p *config.Pair, r *config.Repo) error {
 	cmd := exec.Command(restic, "--repo", r.Repo, "--no-lock", "cat", "config")
-	env := os.Environ()
+	env := runner.ScrubEnv(os.Environ())
 	for k, v := range p.MergedEnv() {
 		env = append(env, k+"="+v)
 	}

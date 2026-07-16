@@ -40,6 +40,7 @@ pairs:
     # snapshots: latest       # "latest" (default) or "all"
     # copy_args: ["--host", "myserver"]   # extra args passed to restic copy
     # timeout: 6h
+    # allow_empty: false      # zero matched snapshots = failure (default)
 `
 
 var initCmd = &cobra.Command{

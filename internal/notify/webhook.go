@@ -20,7 +20,8 @@ type Payload struct {
 	Tool       string          `json:"tool"` // "restic-duper"
 	Version    string          `json:"version"`
 	Host       string          `json:"host"`
-	Status     string          `json:"status"` // "success" | "failure"
+	Status     string          `json:"status"`          // "success" | "failure"
+	Error      string          `json:"error,omitempty"` // set for setup failures that prevented any pair from running
 	StartedAt  time.Time       `json:"started_at"`
 	FinishedAt time.Time       `json:"finished_at"`
 	Pairs      []runner.Result `json:"pairs"`
@@ -58,7 +59,15 @@ func Send(ctx context.Context, log *slog.Logger, w *config.Webhook, p Payload) e
 		return fmt.Errorf("encoding webhook payload: %w", err)
 	}
 
-	client := &http.Client{Timeout: w.Timeout.Std()}
+	client := &http.Client{
+		Timeout: w.Timeout.Std(),
+		// Never follow redirects: Go would convert the POST to a GET and
+		// drop the JSON body, then report 200 — a silently lost
+		// notification. A 3xx response is treated as a delivery failure.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	var lastErr error
 	for i := 1; i <= attempts; i++ {
 		lastErr = send(ctx, client, w, body)
