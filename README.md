@@ -22,7 +22,15 @@ go install github.com/jclement/restic-duper@latest
 ```
 
 Requires `restic` **0.15.0 or newer** on the machine running restic-duper
-(for `RESTIC_FROM_*` support).
+(for `RESTIC_FROM_*` support); `bootstrap` needs **0.17+**. Prefer the
+official restic binaries — some distro packages (e.g. Debian/Ubuntu) are
+built without cloud backends like Azure.
+
+Upgrade later with `restic-duper self-update`: it downloads the latest
+release for your platform, verifies it against the release's
+`checksums.txt`, and atomically replaces the executable (use `sudo` if the
+binary lives in a root-owned directory; `--check` reports without
+installing).
 
 ## Quick start
 
@@ -129,6 +137,7 @@ Notes:
 | `restic-duper bootstrap` | Initialize destination repos that don't exist yet (`--pair` to limit) |
 | `restic-duper check` | Validate the config; `--connect` also probes every repository |
 | `restic-duper init [path]` | Write an example config |
+| `restic-duper self-update` | Replace this binary with the latest GitHub release (`--check` to only look) |
 
 Global flags: `--config/-c`, `--json` (structured logs), `--quiet/-q`,
 `--verbose/-v` (streams full restic output).
