@@ -18,6 +18,11 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go build ./...
+      - name: cross-compile all release targets
+        run: |
+          for os in linux darwin windows; do for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -o /dev/null .
+          done; done
       - run: go test -race ./...
       - name: goreleaser check
         uses: goreleaser/goreleaser-action@v6
